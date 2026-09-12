@@ -1,0 +1,236 @@
+diff --git a/PsychonautWiki Journal/Main/Content/ContentView.swift b/PsychonautWiki Journal/Main/Content/ContentView.swift
+index d6d0748..b1500b5 100644
+--- a/PsychonautWiki Journal/Main/Content/ContentView.swift	
++++ b/PsychonautWiki Journal/Main/Content/ContentView.swift	
+@@ -28,6 +28,7 @@ struct ContentView: View {
+     @AppStorage("hasBeenMigrated4") var hasBeenMigrated4: Bool = false
+     @AppStorage("hasBeenMigrated5") var hasBeenMigrated5: Bool = false
+     @AppStorage("hasBeenMigrated6") var hasBeenMigrated6: Bool = false
++    @AppStorage("hasEnabledFullCatalogV1") var hasEnabledFullCatalog: Bool = false
+ 
+     var body: some View {
+         ContentScreen(isEyeOpen: isEyeOpen2)
+@@ -35,6 +36,11 @@ struct ContentView: View {
+                 WelcomeScreen(isShowingWelcome: $needsToSeeWelcome)
+             }
+             .onAppear {
++                if !hasEnabledFullCatalog {
++                    isEyeOpen1 = true
++                    isEyeOpen2 = true
++                    hasEnabledFullCatalog = true
++                }
+                 if !hasBeenMigrated2 {
+                     PersistenceController.shared.migrateCompanionsAndExperienceSortDates()
+                     hasBeenMigrated2 = true
+diff --git a/PsychonautWiki Journal/Settings/Settings-ViewModel.swift b/PsychonautWiki Journal/Settings/Settings-ViewModel.swift
+index 8bae1bf..9d1a15c 100644
+--- a/PsychonautWiki Journal/Settings/Settings-ViewModel.swift	
++++ b/PsychonautWiki Journal/Settings/Settings-ViewModel.swift	
+@@ -17,6 +17,17 @@
+ import CoreData
+ import Foundation
+ 
++private struct DoseDiaryEntry: Decodable {
++    let amount: Double
++    let createdAt: String?
++    let notes: String
++    let route: String
++    let source: String?
++    let substance: String
++    let takenAt: String
++    let unit: String
++}
++
+ extension SettingsScreen {
+     @MainActor
+     class ViewModel: ObservableObject {
+@@ -43,6 +54,12 @@ extension SettingsScreen {
+         // swiftlint:disable cyclomatic_complexity function_body_length
+         func importData(data: Data) {
+             do {
++                if let doseDiaryEntries = try? JSONDecoder().decode([DoseDiaryEntry].self, from: data),
++                   !doseDiaryEntries.isEmpty {
++                    try importDoseDiary(entries: doseDiaryEntries)
++                    showSuccessToast(message: "Imported \(doseDiaryEntries.count) Dose Diary records")
++                    return
++                }
+                 let file = try JSONDecoder().decode(JournalFile.self, from: data)
+                 try PersistenceController.shared.deleteEverything()
+                 let context = PersistenceController.shared.viewContext
+@@ -166,6 +183,154 @@ extension SettingsScreen {
+                 showErrorToast(message: "Import Failed")
+             }
+         }
++
++        private func importDoseDiary(entries: [DoseDiaryEntry]) throws {
++            let parsed = entries.compactMap { entry -> (DoseDiaryEntry, Date, Date)? in
++                guard let takenAt = parseISO8601(entry.takenAt) else { return nil }
++                let createdAt = entry.createdAt.flatMap { parseISO8601($0) } ?? takenAt
++                return (entry, takenAt, createdAt)
++            }.sorted { $0.1 < $1.1 }
++
++            guard parsed.count == entries.count else {
++                throw CocoaError(.fileReadCorruptFile)
++            }
++
++            try PersistenceController.shared.deleteEverything()
++            let context = PersistenceController.shared.viewContext
++            var companionDict: [String: SubstanceCompanion] = [:]
++            var customSubstanceUnits: [String: String] = [:]
++
++            for session in makeDoseDiarySessions(parsed) {
++                guard let first = session.first else { continue }
++                let names = session.map { canonicalSubstanceName($0.0.substance) }.uniqued()
++                let titleNames = Array(names.prefix(3))
++                let extraCount = names.count - titleNames.count
++                let titleSuffix = extraCount > 0 ? " +\(extraCount)" : ""
++
++                let experience = Experience(context: context)
++                experience.title = titleNames.joined(separator: " + ") + titleSuffix
++                experience.text = "Imported from Dose Diary • \(session.count) dose\(session.count == 1 ? "" : "s")"
++                experience.creationDate = first.2
++                experience.sortDate = first.1
++                experience.isFavorite = false
++
++                for (entry, takenAt, createdAt) in session {
++                    let name = canonicalSubstanceName(entry.substance)
++                    let ingestion = Ingestion(context: context)
++                    ingestion.substanceName = name
++                    ingestion.time = takenAt
++                    ingestion.creationDate = createdAt
++                    ingestion.administrationRoute = canonicalRoute(entry.route).rawValue
++                    ingestion.dose = entry.amount
++                    ingestion.estimatedDoseStandardDeviation = 0
++                    ingestion.isEstimate = false
++                    ingestion.units = canonicalUnit(entry.unit)
++                    ingestion.note = entry.notes
++                    experience.addToIngestions(ingestion)
++
++                    if let companion = companionDict[name] {
++                        ingestion.substanceCompanion = companion
++                    } else {
++                        let companion = SubstanceCompanion(context: context)
++                        companion.substanceName = name
++                        companion.colorAsText = color(for: name).rawValue
++                        companionDict[name] = companion
++                        ingestion.substanceCompanion = companion
++                    }
++
++                    if SubstanceRepo.shared.getSubstance(name: name) == nil {
++                        customSubstanceUnits[name] = canonicalUnit(entry.unit)
++                    }
++                }
++            }
++
++            for (name, units) in customSubstanceUnits.sorted(by: { $0.key < $1.key }) {
++                let custom = CustomSubstance(context: context)
++                custom.name = name
++                custom.units = units
++                custom.explanation = "Imported from a Dose Diary backup."
++            }
++
++            try context.save()
++        }
++
++        private func makeDoseDiarySessions(
++            _ entries: [(DoseDiaryEntry, Date, Date)]
++        ) -> [[(DoseDiaryEntry, Date, Date)]] {
++            let sessionGap: TimeInterval = 12 * 60 * 60
++            var sessions: [[(DoseDiaryEntry, Date, Date)]] = []
++            for entry in entries {
++                if let previous = sessions.last?.last, entry.1.timeIntervalSince(previous.1) <= sessionGap {
++                    sessions[sessions.count - 1].append(entry)
++                } else {
++                    sessions.append([entry])
++                }
++            }
++            return sessions
++        }
++
++        private func parseISO8601(_ value: String) -> Date? {
++            let formatter = ISO8601DateFormatter()
++            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
++            if let date = formatter.date(from: value) { return date }
++            formatter.formatOptions = [.withInternetDateTime]
++            return formatter.date(from: value)
++        }
++
++        private func canonicalSubstanceName(_ rawName: String) -> String {
++            let trimmed = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
++            let aliases: [String: String] = [
++                "lisdexphetamine": "Lisdexamfetamine",
++                "lisdexamphetamine": "Lisdexamfetamine",
++                "vyvanse": "Lisdexamfetamine",
++                "mushrooms": "Psilocybin mushrooms",
++                "4fluoromethylphenidate": "4F-MPH",
++                "pseudoephrine": "Pseudoephedrine",
++                "3ohphenazepam": "3-HO-Phenazepam"
++            ]
++            let key = searchableKey(trimmed)
++            if let alias = aliases[key] { return alias }
++
++            for substance in SubstanceRepo.shared.substances {
++                if searchableKey(substance.name) == key
++                    || substance.commonNames.contains(where: { searchableKey($0) == key }) {
++                    return substance.name
++                }
++            }
++            return trimmed
++        }
++
++        private func searchableKey(_ value: String) -> String {
++            value.lowercased().unicodeScalars
++                .filter(CharacterSet.alphanumerics.contains)
++                .map(String.init)
++                .joined()
++        }
++
++        private func canonicalRoute(_ rawRoute: String) -> AdministrationRoute {
++            let key = rawRoute.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
++            let aliases: [String: AdministrationRoute] = [
++                "swallowed": .oral,
++                "snorted": .insufflated,
++                "intranasal": .insufflated,
++                "vaporized": .inhaled,
++                "vaped": .inhaled
++            ]
++            return AdministrationRoute(rawValue: key) ?? aliases[key] ?? .oral
++        }
++
++        private func canonicalUnit(_ rawUnit: String) -> String {
++            switch rawUnit.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) {
++            case "mcg", "ug", "μg", "µg": return "µg"
++            case "ml": return "mL"
++            default: return rawUnit.trimmingCharacters(in: .whitespacesAndNewlines)
++            }
++        }
++
++        private func color(for substanceName: String) -> SubstanceColor {
++            let index = substanceName.utf8.reduce(0) { ($0 + Int($1)) % SubstanceColor.allCases.count }
++            return SubstanceColor.allCases[index]
++        }
+         // swiftlint:enable cyclomatic_complexity function_body_length
+ 
+         func deleteEverything() {
+diff --git a/PsychonautWiki Journal/Settings/SettingsScreen.swift b/PsychonautWiki Journal/Settings/SettingsScreen.swift
+index b918823..61b59e8 100644
+--- a/PsychonautWiki Journal/Settings/SettingsScreen.swift	
++++ b/PsychonautWiki Journal/Settings/SettingsScreen.swift	
+@@ -152,7 +152,7 @@ struct SettingsContent: View {
+                 Button {
+                     isShowingImportAlert.toggle()
+                 } label: {
+-                    Label("Import Data", systemImage: "arrow.down.doc")
++                    Label("Import Journal or Dose Diary Data", systemImage: "arrow.down.doc")
+                 }
+                 .confirmationDialog(
+                     "Are you sure?",
+@@ -165,7 +165,7 @@ struct SettingsContent: View {
+                         Button("Cancel", role: .cancel) {}
+                     },
+                     message: {
+-                        Text("Importing will delete all the data currently in the app and replace it with the imported data.")
++                        Text("Journal exports and Dose Diary backups are supported. Importing will delete all data currently in the app and replace it with the imported data.")
+                     }
+                 )
+                 Button {
