@@ -13,6 +13,7 @@ mkdir -p "$output_root/Payload"
 
 git clone --no-checkout https://github.com/isaakhanimann/psychonautwiki-journal-ios.git "$source_root"
 git -C "$source_root" checkout --detach "$upstream_commit"
+git -C "$source_root" apply "$workspace_root/Patches/journal-enhancements.patch"
 
 python3 - "$source_root" <<'PY'
 from pathlib import Path
