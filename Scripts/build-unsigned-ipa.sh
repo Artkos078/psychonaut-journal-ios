@@ -63,6 +63,8 @@ xcodebuild \
   CODE_SIGNING_REQUIRED=NO \
   CODE_SIGN_IDENTITY="" \
   DEVELOPMENT_TEAM="" \
+  MARKETING_VERSION="11.11.3" \
+  CURRENT_PROJECT_VERSION="3" \
   build
 
 app_path="$derived_data/Build/Products/${configuration}-iphoneos/Journal.app"
