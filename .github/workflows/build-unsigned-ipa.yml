@@ -6,6 +6,7 @@ on:
     branches:
       - main
     paths:
+      - "Patches/**"
       - "Scripts/build-unsigned-ipa.sh"
       - ".github/workflows/build-unsigned-ipa.yml"
 
