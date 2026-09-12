@@ -213,10 +213,83 @@ index 8bae1bf..9d1a15c 100644
  
          func deleteEverything() {
 diff --git a/PsychonautWiki Journal/Settings/SettingsScreen.swift b/PsychonautWiki Journal/Settings/SettingsScreen.swift
-index b918823..04c44dc 100644
+index b918823..5e68787 100644
 --- a/PsychonautWiki Journal/Settings/SettingsScreen.swift	
 +++ b/PsychonautWiki Journal/Settings/SettingsScreen.swift	
-@@ -99,6 +99,7 @@ struct SettingsContent: View {
+@@ -17,6 +17,72 @@
+ import AlertToast
+ import SwiftUI
+ import AppIntents
++import UniformTypeIdentifiers
++import UIKit
++
++private struct JSONDocumentPicker: UIViewControllerRepresentable {
++    let onPick: (Result<Data, Error>) -> Void
++    let onCancel: () -> Void
++
++    func makeCoordinator() -> Coordinator {
++        Coordinator(onPick: onPick, onCancel: onCancel)
++    }
++
++    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
++        // Copy mode avoids depending on a third-party Files provider keeping its
++        // security-scoped URL alive while a large journal import is processed.
++        let picker = UIDocumentPickerViewController(
++            forOpeningContentTypes: [.json, .plainText, .data],
++            asCopy: true
++        )
++        picker.delegate = context.coordinator
++        picker.allowsMultipleSelection = false
++        picker.shouldShowFileExtensions = true
++        return picker
++    }
++
++    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
++
++    final class Coordinator: NSObject, UIDocumentPickerDelegate {
++        let onPick: (Result<Data, Error>) -> Void
++        let onCancel: () -> Void
++
++        init(onPick: @escaping (Result<Data, Error>) -> Void, onCancel: @escaping () -> Void) {
++            self.onPick = onPick
++            self.onCancel = onCancel
++        }
++
++        func documentPicker(
++            _ controller: UIDocumentPickerViewController,
++            didPickDocumentsAt urls: [URL]
++        ) {
++            guard let url = urls.first else {
++                onCancel()
++                return
++            }
++
++            let hasSecurityScopedAccess = url.startAccessingSecurityScopedResource()
++            defer {
++                if hasSecurityScopedAccess {
++                    url.stopAccessingSecurityScopedResource()
++                }
++            }
++            do {
++                let data = try Data(contentsOf: url, options: .mappedIfSafe)
++                guard !data.isEmpty else {
++                    throw CocoaError(.fileReadCorruptFile)
++                }
++                onPick(.success(data))
++            } catch {
++                onPick(.failure(error))
++            }
++        }
++
++        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
++            onCancel()
++        }
++    }
++}
+ 
+ struct SettingsScreen: View {
+     @AppStorage(PersistenceController.isEyeOpenKey2) var isEyeOpen: Bool = false
+@@ -99,6 +165,7 @@ struct SettingsContent: View {
  
      @State private var isShowingDeleteConfirmation = false
      @State private var isShowingImportAlert = false
@@ -224,7 +297,7 @@ index b918823..04c44dc 100644
  
      var body: some View {
          List {
-@@ -152,8 +153,12 @@ struct SettingsContent: View {
+@@ -152,8 +219,12 @@ struct SettingsContent: View {
                  Button {
                      isShowingImportAlert.toggle()
                  } label: {
@@ -238,7 +311,7 @@ index b918823..04c44dc 100644
                  .confirmationDialog(
                      "Are you sure?",
                      isPresented: $isShowingImportAlert,
-@@ -165,7 +170,7 @@ struct SettingsContent: View {
+@@ -165,7 +236,7 @@ struct SettingsContent: View {
                          Button("Cancel", role: .cancel) {}
                      },
                      message: {
@@ -247,39 +320,47 @@ index b918823..04c44dc 100644
                      }
                  )
                  Button {
-@@ -220,17 +225,28 @@ struct SettingsContent: View {
-             isPresented: $isImporting,
-             allowedContentTypes: [.json]
-         ) { result in
-+            isReadingImportFile = true
-+            defer { isReadingImportFile = false }
-             do {
-                 let selectedFile: URL = try result.get()
+@@ -216,23 +287,27 @@ struct SettingsContent: View {
+             }
+             eye
+         }
+-        .fileImporter(
+-            isPresented: $isImporting,
+-            allowedContentTypes: [.json]
+-        ) { result in
+-            do {
+-                let selectedFile: URL = try result.get()
 -                if selectedFile.startAccessingSecurityScopedResource() {
 -                    let data = try Data(contentsOf: selectedFile)
 -                    importData(data)
 -                } else {
 -                    toastViewModel.showErrorToast(message: "Permission Denied")
-+                let hasSecurityScopedAccess = selectedFile.startAccessingSecurityScopedResource()
-+                defer {
-+                    if hasSecurityScopedAccess {
-+                        selectedFile.stopAccessingSecurityScopedResource()
++        .sheet(isPresented: $isImporting) {
++            JSONDocumentPicker(
++                onPick: { result in
++                    isImporting = false
++                    switch result {
++                    case .success(let data):
++                        isReadingImportFile = true
++                        importData(data)
++                        isReadingImportFile = false
++                    case .failure(let error):
++                        toastMessage = "Could Not Read JSON"
++                        isSuccessToast = false
++                        isShowingToast = true
++                        print("Error getting data: \(error.localizedDescription)")
 +                    }
-+                }
-+
-+                // A false return value does not mean the file is unreadable. Local files
-+                // and some Files providers do not require a security-scoped session.
-+                let data = try Data(contentsOf: selectedFile, options: .mappedIfSafe)
-+                guard !data.isEmpty else {
-+                    throw CocoaError(.fileReadCorruptFile)
++                },
++                onCancel: {
++                    isImporting = false
                  }
 -                selectedFile.stopAccessingSecurityScopedResource()
-+                importData(data)
-             } catch {
+-            } catch {
 -                toastViewModel.showErrorToast(message: "Import Failed")
-+                toastMessage = "Could Not Read JSON"
-+                isSuccessToast = false
-+                isShowingToast = true
-                 print("Error getting data: \(error.localizedDescription)")
-             }
+-                print("Error getting data: \(error.localizedDescription)")
+-            }
++            )
++            .ignoresSafeArea()
          }
+         .fileExporter(
+             isPresented: $isExporting,
