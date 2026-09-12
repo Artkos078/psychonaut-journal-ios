@@ -213,19 +213,32 @@ index 8bae1bf..9d1a15c 100644
  
          func deleteEverything() {
 diff --git a/PsychonautWiki Journal/Settings/SettingsScreen.swift b/PsychonautWiki Journal/Settings/SettingsScreen.swift
-index b918823..61b59e8 100644
+index b918823..04c44dc 100644
 --- a/PsychonautWiki Journal/Settings/SettingsScreen.swift	
 +++ b/PsychonautWiki Journal/Settings/SettingsScreen.swift	
-@@ -152,7 +152,7 @@ struct SettingsContent: View {
+@@ -99,6 +99,7 @@ struct SettingsContent: View {
+ 
+     @State private var isShowingDeleteConfirmation = false
+     @State private var isShowingImportAlert = false
++    @State private var isReadingImportFile = false
+ 
+     var body: some View {
+         List {
+@@ -152,8 +153,12 @@ struct SettingsContent: View {
                  Button {
                      isShowingImportAlert.toggle()
                  } label: {
 -                    Label("Import Data", systemImage: "arrow.down.doc")
-+                    Label("Import Journal or Dose Diary Data", systemImage: "arrow.down.doc")
++                    Label(
++                        isReadingImportFile ? "Reading Import File…" : "Import Journal or Dose Diary Data",
++                        systemImage: isReadingImportFile ? "hourglass" : "arrow.down.doc"
++                    )
                  }
++                .disabled(isReadingImportFile)
                  .confirmationDialog(
                      "Are you sure?",
-@@ -165,7 +165,7 @@ struct SettingsContent: View {
+                     isPresented: $isShowingImportAlert,
+@@ -165,7 +170,7 @@ struct SettingsContent: View {
                          Button("Cancel", role: .cancel) {}
                      },
                      message: {
@@ -234,3 +247,39 @@ index b918823..61b59e8 100644
                      }
                  )
                  Button {
+@@ -220,17 +225,28 @@ struct SettingsContent: View {
+             isPresented: $isImporting,
+             allowedContentTypes: [.json]
+         ) { result in
++            isReadingImportFile = true
++            defer { isReadingImportFile = false }
+             do {
+                 let selectedFile: URL = try result.get()
+-                if selectedFile.startAccessingSecurityScopedResource() {
+-                    let data = try Data(contentsOf: selectedFile)
+-                    importData(data)
+-                } else {
+-                    toastViewModel.showErrorToast(message: "Permission Denied")
++                let hasSecurityScopedAccess = selectedFile.startAccessingSecurityScopedResource()
++                defer {
++                    if hasSecurityScopedAccess {
++                        selectedFile.stopAccessingSecurityScopedResource()
++                    }
++                }
++
++                // A false return value does not mean the file is unreadable. Local files
++                // and some Files providers do not require a security-scoped session.
++                let data = try Data(contentsOf: selectedFile, options: .mappedIfSafe)
++                guard !data.isEmpty else {
++                    throw CocoaError(.fileReadCorruptFile)
+                 }
+-                selectedFile.stopAccessingSecurityScopedResource()
++                importData(data)
+             } catch {
+-                toastViewModel.showErrorToast(message: "Import Failed")
++                toastMessage = "Could Not Read JSON"
++                isSuccessToast = false
++                isShowingToast = true
+                 print("Error getting data: \(error.localizedDescription)")
+             }
+         }
