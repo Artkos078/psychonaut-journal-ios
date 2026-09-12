@@ -79,5 +79,8 @@ ipa_path="$output_root/PsychonautWiki-Journal-unsigned.ipa"
   cd "$output_root"
   /usr/bin/ditto -c -k --sequesterRsrc --keepParent Payload "$(basename "$ipa_path")"
 )
-/usr/bin/shasum -a 256 "$ipa_path" > "$ipa_path.sha256"
+(
+  cd "$output_root"
+  /usr/bin/shasum -a 256 "$(basename "$ipa_path")" > "$(basename "$ipa_path").sha256"
+)
 echo "Unsigned IPA: $ipa_path"
